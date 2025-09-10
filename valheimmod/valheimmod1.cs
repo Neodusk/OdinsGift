@@ -36,6 +36,8 @@ namespace valheimmod
         private const float holdThreshold = 0.35f; // seconds
         public static int currentDay = 0;
         public static bool LoggedIn = false;
+        public static bool justDied = false;
+
 
         // Use this class to add your own localization to the game
         // https://valheim-modding.github.io/Jotunn/tutorials/localization.html
@@ -313,6 +315,18 @@ namespace valheimmod
                         }
                     }
                 }
+                if (justDied)
+                {
+                    if (Player.m_localPlayer != null)
+                    {
+                        if (Player.m_localPlayer.m_seman != null)
+                        {
+                            Jotunn.Logger.LogInfo("Player has died, loading special ability states.");
+                            ModAbilities.Effects.Load(true);
+                            justDied = false;
+                        }
+                    }
+                }
             }
         }
 
@@ -486,7 +500,7 @@ namespace valheimmod
         }
 
         [HarmonyPatch(typeof(Attack), "ProjectileAttackTriggered")]
-        class Player_ProjectileAttackTriggered_ModAbilities_SpectralArrow_Patch
+        class SpectralArrow_ProjectileAttack_Unified_Patch
         {
             static void Postfix(Attack __instance)
             {
@@ -500,41 +514,28 @@ namespace valheimmod
                 var weapon = character.GetCurrentWeapon();
                 if (weapon != null && weapon.m_shared != null && weapon.m_shared.m_skillType == Skills.SkillType.Bows)
                 {
+                    // Initialize shots fired if not exists
+                    if (!ModAbilities.SpectralArrow.Instance.ShotsFired.ContainsKey(character))
+                        ModAbilities.SpectralArrow.Instance.ShotsFired[character] = 0;
+                        
                     // Track shots fired
                     ModAbilities.SpectralArrow.Instance.ShotsFired[character]++;
-                    Jotunn.Logger.LogInfo($"Spectral Arrow: {character.m_name} has fired {ModAbilities.SpectralArrow.Instance.ShotsFired[character]} shots.");
+                    Jotunn.Logger.LogInfo($"Spectral Arrow: {character.m_name} has fired {ModAbilities.SpectralArrow.Instance.ShotsFired[character]} spectral shots.");
+                    
+                    // Add weapon to list for cleanup later
                     if (!ModAbilities.SpectralArrow.Instance.weaponList.Contains(weapon))
                     {
                         Jotunn.Logger.LogInfo($"Spectral Arrow: Adding {weapon.m_shared.m_name} to weapon list.");
                         ModAbilities.SpectralArrow.Instance.weaponList.Add(weapon);
                     }
 
+                    // After 3 shots, cancel the ability
+                    if (ModAbilities.SpectralArrow.Instance.ShotsFired[character] >= 3)
+                    {
+                        Jotunn.Logger.LogInfo($"Spectral Arrow: {character.m_name} has fired 3 spectral shots, cancelling ability.");
+                        ModAbilities.SpectralArrow.Instance.Cancel(character);
+                    }
                 }
-            }
-        }
-
-        [HarmonyPatch(typeof(Attack), "ProjectileAttackTriggered")]
-        class SpectralArrow_FireProjectile_Patch
-        {
-            static void Prefix(Attack __instance, ref float ___m_projectileVel, ref float ___m_attackRange, ref float ___m_damageMultiplier, ref float ___m_projectileAccuracy, ref float ___m_drawDurationMin)
-            {
-                var player = __instance.m_character as Player;
-                if (player == null)
-                    return;
-                if (player.m_seman.HaveStatusEffect(valheimmod.ModAbilities.SpectralArrow.Instance.SpecialEffect.StatusEffect.m_nameHash))
-                {
-                    Jotunn.Logger.LogInfo($"Spectral Arrow: {player.m_name} is firing a spectral arrow.");
-                    // Temporarily boost the projectile's stats for this shot only
-                    ___m_projectileVel = valheimmod.ModAbilities.SpectralArrow.Instance.specialVelocity;
-                    ___m_attackRange = valheimmod.ModAbilities.SpectralArrow.Instance.specialRange;
-                    ___m_damageMultiplier = valheimmod.ModAbilities.SpectralArrow.Instance.specialDamageMultiplier;
-                    ___m_projectileAccuracy = valheimmod.ModAbilities.SpectralArrow.Instance.specialAccuracy;
-                }
-                else
-                {
-                    ModAbilities.SpectralArrow.Instance.Cancel(player);
-                }
-
             }
         }
 
@@ -544,6 +545,8 @@ namespace valheimmod
         [HarmonyPatch(typeof(Player), "UpdateAttackBowDraw")]
         class SpectralArrow_Draw_Patch
         {
+            private static Dictionary<Player, bool> hasLoggedThisDraw = new Dictionary<Player, bool>();
+            
             static void Prefix(Player __instance, ItemDrop.ItemData weapon, float dt)
             {
 
@@ -552,15 +555,8 @@ namespace valheimmod
                     // store the weapon defaults into the dictionary if it does not exist
                     if (!ModAbilities.SpectralArrow.Instance.weaponDefaults.ContainsKey(weapon.m_shared.m_name))
                     {
-                        ModAbilities.SpectralArrow.Instance.weaponDefaults[weapon.m_shared.m_name] = new Dictionary<string, float>
-                        {
-                            { "velocity", weapon.m_shared.m_attack.m_projectileVel },
-                            { "range", weapon.m_shared.m_attack.m_attackRange },
-                            { "dmgMultiplier", weapon.m_shared.m_attack.m_damageMultiplier },
-                            { "accuracy", weapon.m_shared.m_attack.m_projectileAccuracy },
-                            { "drawMin", weapon.m_shared.m_attack.m_drawDurationMin },
-                        };
-                        Jotunn.Logger.LogInfo($"Spectral Arrow: Saved defaults for {weapon.m_shared.m_name}: Velocity={weapon.m_shared.m_attack.m_projectileVel}, Range={weapon.m_shared.m_attack.m_attackRange}");
+                        ModAbilities.SpectralArrow.Instance.weaponDefaults[weapon.m_shared.m_name] = (weapon.m_shared.m_attack.m_projectileVel, weapon.m_shared.m_attack.m_drawDurationMin);
+                        Jotunn.Logger.LogInfo($"Spectral Arrow: Saved default velocity for {weapon.m_shared.m_name}: {weapon.m_shared.m_attack.m_projectileVel} and draw time: {weapon.m_shared.m_attack.m_drawDurationMin}");
                     }
                     // add the weapon into the weapon list if it does not exist
                     if (!ModAbilities.SpectralArrow.Instance.weaponList.Contains(weapon))
@@ -568,59 +564,87 @@ namespace valheimmod
                         Jotunn.Logger.LogInfo($"Spectral Arrow: Adding {weapon.m_shared.m_name} to weapon list.");
                         ModAbilities.SpectralArrow.Instance.weaponList.Add(weapon);
                     }
-                    if (__instance.m_seman.HaveStatusEffect(valheimmod.ModAbilities.SpectralArrow.Instance.SpecialEffect.StatusEffect.m_nameHash))
+                    if (ModAbilities.SpectralArrow.Instance.SpecialEffect?.StatusEffect != null && 
+                        __instance.m_seman.HaveStatusEffect(ModAbilities.SpectralArrow.Instance.SpecialEffect.StatusEffect.m_nameHash))
                     {
-                        weapon.m_shared.m_attack.m_projectileVel = ModAbilities.SpectralArrow.Instance.specialVelocity; // Set to desired fast value
-                        weapon.m_shared.m_attack.m_attackRange = ModAbilities.SpectralArrow.Instance.specialRange; // Set to desired fast value
-                        weapon.m_shared.m_attack.m_damageMultiplier = ModAbilities.SpectralArrow.Instance.specialDamageMultiplier; // Set to desired fast value
-                        weapon.m_shared.m_attack.m_projectileAccuracy = ModAbilities.SpectralArrow.Instance.specialAccuracy; // Set to desired fast value
-                        weapon.m_shared.m_attack.m_drawDurationMin = ModAbilities.SpectralArrow.Instance.specialDrawDurationMin; // Set to desired fast value
+                        // Only log once per draw session to avoid spam
+                        if (!hasLoggedThisDraw.ContainsKey(__instance) || !hasLoggedThisDraw[__instance])
+                        {
+                            Jotunn.Logger.LogInfo($"Spectral Arrow: Player {__instance.m_name} is drawing with spectral arrow effect active");
+                            hasLoggedThisDraw[__instance] = true;
+                        }
+                        
+                        // Modify weapon projectile velocity and draw time
+                        weapon.m_shared.m_attack.m_projectileVel = ModAbilities.SpectralArrow.Instance.specialVelocity;
+                        weapon.m_shared.m_attack.m_drawDurationMin = ModAbilities.SpectralArrow.Instance.specialDrawDurationMin;
                     }
                     else
                     {
-                        ModAbilities.SpectralArrow.Instance.Cancel(__instance);
+                        // Reset the logging flag when not using spectral arrow
+                        if (hasLoggedThisDraw.ContainsKey(__instance))
+                            hasLoggedThisDraw[__instance] = false;
                     }
                 }
             }
         }
 
-        [HarmonyPatch(typeof(Player), "PlayerAttackInput")]
-        class Player_AttackInput_Bow_Patch
-        {
-            static void Prefix(Player __instance, float dt)
-            {
-                if (__instance.m_seman.HaveStatusEffect(ModAbilities.SpectralArrow.Instance.SpecialEffect.StatusEffect.m_nameHash))
-                {
-                    // Track shots fired
-                    if (!ModAbilities.SpectralArrow.Instance.ShotsFired.ContainsKey(__instance))
-                        ModAbilities.SpectralArrow.Instance.ShotsFired[__instance] = 0;
-
-                    // After 3 shots, revert skill and velocity, remove effect
-                    if ((ModAbilities.SpectralArrow.Instance.ShotsFired[__instance] >= 3) && __instance.m_seman.HaveStatusEffect(ModAbilities.SpectralArrow.Instance.SpecialEffect.StatusEffect.m_nameHash))
-                    {
-                        ModAbilities.SpectralArrow.Instance.Cancel(__instance);
-                    }
-
-                }
-            }
-        }
-
+        [HarmonyPatch(typeof(Player), "OnDeath")]        
         class Player_On_Death_Patch
         {
-            static void Postfix(Player __instance)
+            static void Prefix(Player __instance)
             {
                 if (__instance.IsPlayer())
                 {
                     // reset special ability states
                     if (__instance.m_seman != null)
                     {
+                        ModAbilities.Effects.SaveToPreferences(true);
+                        justDied = true;
+                        Jotunn.Logger.LogInfo($"Player has died, saving special ability states. {justDied}");
+                    }
+                }
+            }
+            static void Postfix(Player __instance)
+            {
+                if (__instance.IsPlayer())
+                {
+                    Jotunn.Logger.LogInfo("Player has died, resetting special ability states.");
+                    // reset special ability states
+                    if (__instance.m_seman != null)
+                    {
                         JumpState.SpecialJumpActive[__instance] = false;
                         ModAbilities.SpectralArrow.Instance.Cancel(__instance);
+                        // ModAbilities.Effects.Load(true);
+                        // Jotunn.Logger.LogInfo("Player has died, loading special ability states.");
                     }
 
                 }
             }
         }
+        // [HarmonyPatch(typeof(Player), "OnRespawn")]
+        // class Player_On_Respawn_Patch {
+        //     static void Postfix(Player __instance)
+        //     {
+        //         if (__instance.IsPlayer())
+        //         {
+        //             // reset special ability states
+        //             if (__instance.m_seman != null)
+        //             {
+        //                 Jotunn.Logger.LogInfo("Player has respawned, resetting special ability states.");
+        //                 if (justDied)
+        //                 {
+        //                     ModAbilities.Effects.Load(true);
+        //                     Jotunn.Logger.LogInfo("Player has died, loading special ability states.");
+        //                     justDied = false;
+        //                 }
+        //             }
+
+        //         }
+        //     }
+
+        // }
+
+
         [HarmonyPatch(typeof(Hud), nameof(Hud.InRadial))]
         class Hud_InRadial_RadialMenu_Patch
         {
@@ -637,7 +661,6 @@ namespace valheimmod
         {
             static void Postfix(Hud __instance, List<StatusEffect> statusEffects)
             {
-
                 ModAbilities.Effects.UpdateStatusEffect(__instance, statusEffects);
             }
         }
