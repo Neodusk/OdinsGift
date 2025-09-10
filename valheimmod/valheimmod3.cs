@@ -96,6 +96,7 @@ namespace valheimmod
             public class Effects
             {
                 public static List<StatusEffect> statusEffects = new List<StatusEffect>();
+                public static List<StatusEffect> coolDownStatusEffects = new List<StatusEffect>();
                 /// <summary>
                 /// Register status effects for special abilities.
                 /// </summary>
@@ -105,14 +106,19 @@ namespace valheimmod
                     {
                         ability.AddEffects();
                         List<StatusEffect> se = ability.GetStatusEffects();
+                        List<StatusEffect> cdSE = ability.GetCooldownStatusEffects();
                         foreach (var effect in se)
                         {
                             statusEffects.Add(effect);
                         }
+                        foreach (var effect in cdSE)
+                        {
+                            coolDownStatusEffects.Add(effect);
+                        }
                     }
                 }
-                public static Dictionary<string, float> Saved = new Dictionary<string, float>();
-                public static void Save()
+                public static Dictionary<string, float> SavedOnDeath = new Dictionary<string, float>();
+                public static void SaveOnDeath()
                 {
                     foreach (StatusEffect effect in statusEffects)
                     {
@@ -123,17 +129,22 @@ namespace valheimmod
                         }
                         if (Player.m_localPlayer.m_seman.HaveStatusEffect(effect.m_nameHash))
                         {
-                            if (effect.name == "TeleportEffect" || effect.name == "PendingTeleportEffect")
+                            if (effect.name == "PendingTeleportEffect")
                             {
+                                return;
+                            }
+                            if (effect.name == "TeleportEffect")
+                            {
+                                SavedOnDeath["effect_day"] = EnvMan.instance.GetDay(); // Save the current day for teleport effect
                                 return; // Skip saving the teleport effect, as it is handled differently
                             }
                             remainingTime = Player.m_localPlayer.m_seman.GetStatusEffect(effect.m_nameHash).GetRemaningTime();
                         }
-                        Saved[effect.name] = remainingTime;
+                        SavedOnDeath[effect.name] = remainingTime;
                     }
                 }
 
-                public static void SaveToPreferences()
+                 public static void SaveToPreferencesOnDeath()
                 {
                     Save();
                     foreach (var kvp in Saved)
@@ -145,15 +156,78 @@ namespace valheimmod
                     }
                     PlayerPrefs.Save();
                 }
+
+                public static Dictionary<string, float> Saved = new Dictionary<string, float>();
+                public static void Save(bool onDeath = false)
+                {
+                    foreach (StatusEffect effect in statusEffects)
+                    {
+                        float remainingTime = 0;
+                        if (Player.m_localPlayer == null)
+                        {
+                            return;
+                        }
+                        if (!onDeath)
+                        {
+                            if (Player.m_localPlayer.m_seman.HaveStatusEffect(effect.m_nameHash))
+                            {
+                                if (effect.name == "TeleportEffect" || effect.name == "PendingTeleportEffect")
+                                {
+                                    return; // Skip saving the teleport effect, as it is handled differently
+                                }
+                                remainingTime = Player.m_localPlayer.m_seman.GetStatusEffect(effect.m_nameHash).GetRemaningTime();
+                            }
+                            Saved[effect.name] = remainingTime;
+                        }
+                        else
+                        {
+                            if (Player.m_localPlayer.m_seman.HaveStatusEffect(effect.m_nameHash))
+                            {
+                                if (effect.name == "TeleportEffect" || effect.name == "PendingTeleportEffect")
+                                {
+                                    SavedOnDeath["effect_day"] =  EnvMan.instance.GetDay();; // Skip saving the teleport effect, as it is handled differently
+                                }
+                                remainingTime = Player.m_localPlayer.m_seman.GetStatusEffect(effect.m_nameHash).GetRemaningTime();
+                            }
+                            SavedOnDeath[effect.name] = remainingTime;
+                        }
+                    }
+                }
+
+                public static void SaveToPreferences(bool onDeath = false)
+                {
+                    var savedDict = onDeath ? SavedOnDeath : Saved;
+                    if (onDeath)
+                    {
+                        SaveOnDeath();
+                    }
+                    else
+                    {
+                        Save();
+                    }
+                    Save();
+                    foreach (var kvp in savedDict)
+                    {
+                        string effectName = kvp.Key;
+                        float remainingTime = kvp.Value;
+                        Jotunn.Logger.LogInfo($"Saving to PlayerPrefs | {effectName} status effect with remaining time: {remainingTime}");
+                        PlayerPrefs.SetFloat(effectName, (remainingTime > 0 && !float.IsNaN(remainingTime)) ? remainingTime : 0);
+                    }
+                    PlayerPrefs.Save();
+                }
                 
                 public static Dictionary<string, float> loadedStatusEffects = new Dictionary<string, float>();
-                public static void Load()
+                public static void Load(bool onDeath = false)
                 {
                     foreach (SpecialAbilityBase ability in specialAbilities)
                     {
+                        List<StatusEffect> abilityStatusEffects;
                         loadedStatusEffects.Clear();
                         // Load the status effect name and whether it is active
-                        List<StatusEffect> abilityStatusEffects = ability.GetStatusEffects();
+                        if (onDeath)
+                            abilityStatusEffects = ability.GetCooldownStatusEffects();
+                        else
+                            abilityStatusEffects = ability.GetStatusEffects();
                         foreach (StatusEffect effect in abilityStatusEffects)
                         {
                             if (effect != null && effect.name != null)
@@ -197,10 +271,15 @@ namespace valheimmod
                 public virtual void Call() { }
                 public virtual void CallPending(valheimmod instance = null) { }
                 public abstract void AddEffects();
-                public abstract List<StatusEffect> abilitySE { get; set; }  // Property to hold the status effects for the ability
+                public abstract List<StatusEffect> abilityStatusEffects { get; set; }  // Property to hold the status effects for the ability
+                public abstract List<StatusEffect> abilityCooldownStatusEffects { get; set; }  // Property to hold the status effects for the ability
                 public List<StatusEffect> GetStatusEffects()
                 {
-                    return abilitySE;
+                    return abilityStatusEffects;
+                }
+                public List<StatusEffect> GetCooldownStatusEffects()
+                {
+                    return abilityCooldownStatusEffects;
                 }
                 /// <summary>
                 /// Updates the durations of all the special ability effects
@@ -218,7 +297,8 @@ namespace valheimmod
                 public int defaultForce = 8; // Set the default jump force
                 public CustomStatusEffect SpecialEffect; // Custom status effect for the special jump
                 public CustomStatusEffect PendingSpecialEffect; // Custom status effect for the special jump
-                public override List<StatusEffect> abilitySE { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityStatusEffects { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityCooldownStatusEffects { get; set; } = new List<StatusEffect>();
                 public static SpecialJump Instance = new SpecialJump();
                 private static float cooldown = 5f * 60f;
                 public override void CallPending(valheimmod instance = null)
@@ -370,8 +450,9 @@ namespace valheimmod
                     };
                     PrefabManager.OnPrefabsRegistered -= ModAbilities.Effects.Register;
                     PendingSpecialEffect = new CustomStatusEffect(pendeffect, fixReference: false);
-                    abilitySE.Add(SpecialEffect.StatusEffect);
-                    abilitySE.Add(PendingSpecialEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityCooldownStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityStatusEffects.Add(PendingSpecialEffect.StatusEffect);
                 }
                 public override void updateDuration(Dictionary<string, float> statusEffectDict)
                 {
@@ -403,7 +484,8 @@ namespace valheimmod
                 public bool teleportCancelled = false;
                 public bool teleportPending = false;
                 public string teleportEndingMsg = "Traveling...";
-                public override List<StatusEffect> abilitySE { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityStatusEffects { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityCooldownStatusEffects { get; set; } = new List<StatusEffect>();
                 public static SpecialTeleport Instance = new SpecialTeleport();
 
                 public override void Call()
@@ -478,8 +560,9 @@ namespace valheimmod
 
                     PendingSpecialEffect = new CustomStatusEffect(pendteleporteffect, fixReference: false);
                     SpecialEffect = new CustomStatusEffect(teleporteffect, fixReference: false);
-                    abilitySE.Add(SpecialEffect.StatusEffect);
-                    abilitySE.Add(PendingSpecialEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityCooldownStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityStatusEffects.Add(PendingSpecialEffect.StatusEffect);
                 }
 
                 public override void updateDuration(Dictionary<string, float> statusEffectDict)
@@ -555,19 +638,15 @@ namespace valheimmod
                 public Sprite[] textures = new Sprite[3];
                 public CustomStatusEffect SpecialEffect;
                 public CustomStatusEffect SpecialCDEffect;
-                public override List<StatusEffect> abilitySE { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityStatusEffects { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityCooldownStatusEffects { get; set; } = new List<StatusEffect>();
                 public Dictionary<Player, int> ShotsFired = new Dictionary<Player, int>();
                 public Dictionary<Player, float> PreviousSkill = new Dictionary<Player, float>();
-                public float specialVelocity = 100f + modIdentifierPostfix; // base velocity for the spectral arrow, modified by the modIdentifierPostfix
-                public float specialRange = 200 + modIdentifierPostfix;
-                public float specialDamageMultiplier = 200f + modIdentifierPostfix;
-                public float specialAccuracy = .1f + modIdentifierPostfix; 
-                public float specialDrawDurationMin = 0.1f + modIdentifierPostfix;
-                public static float modIdentifierPostfix = 0.012345f; // used to identify values changed by the mod on weapons
-
+                public float specialVelocity = 30f; // base velocity for the spectral arrow
+                public float specialDrawDurationMin = 0.1f;
                 // public ItemDrop.ItemData weapon;
                 public List<ItemDrop.ItemData> weaponList = new List<ItemDrop.ItemData>(); // List of weapons to apply the spectral arrow effect to
-                public Dictionary<string, Dictionary<string, float>> weaponDefaults = new Dictionary<string, Dictionary<string, float>>(); // Store default weapon velocities
+                public Dictionary<string, (float velocity, float drawTime)> weaponDefaults = new Dictionary<string, (float, float)>(); // Store default weapon velocities and draw times
                 internal float cooldown = 60f * 10f; // cooldown time for the spectral arrow ability
                 public static SpectralArrow Instance = new SpectralArrow();
 
@@ -575,41 +654,12 @@ namespace valheimmod
                 {
                     foreach (ItemDrop.ItemData weapon in weaponList)
                     {
-                        // Helper function to check if a value ends with modIdentifierPostfix
-                        bool IsModdedValue(float value, float moddedValue)
+                        if (weaponDefaults.ContainsKey(weapon.m_shared.m_name))
                         {
-                            return Mathf.Abs(value - moddedValue) < 0.00001f;
-                        }
-                        bool modded = false;
-                        // Only revert if the current value "ends with" modIdentifierPostfix
-                        if (IsModdedValue(weapon.m_shared.m_attack.m_projectileVel, specialVelocity))
-                        {
-                            weapon.m_shared.m_attack.m_projectileVel = weaponDefaults[weapon.m_shared.m_name]["velocity"];
-                            modded = true;
-                        }
-                        if (IsModdedValue(weapon.m_shared.m_attack.m_attackRange, specialRange))
-                        {
-                            weapon.m_shared.m_attack.m_attackRange = weaponDefaults[weapon.m_shared.m_name]["range"];
-                            modded = true;
-                        }
-                        if (IsModdedValue(weapon.m_shared.m_attack.m_damageMultiplier, specialDamageMultiplier))
-                        {
-                            weapon.m_shared.m_attack.m_damageMultiplier = weaponDefaults[weapon.m_shared.m_name]["dmgMultiplier"];
-                            modded = true;
-                        }
-                        if (IsModdedValue(weapon.m_shared.m_attack.m_projectileAccuracy, specialAccuracy))
-                        {
-                            weapon.m_shared.m_attack.m_projectileAccuracy = weaponDefaults[weapon.m_shared.m_name]["accuracy"];
-                            modded = true;
-                        }
-                        if (IsModdedValue(weapon.m_shared.m_attack.m_drawDurationMin, specialDrawDurationMin))
-                        {
-                            weapon.m_shared.m_attack.m_drawDurationMin = weaponDefaults[weapon.m_shared.m_name]["drawMin"];
-                            modded = true;
-                        }
-                        if (modded)
-                        {
-                            Jotunn.Logger.LogInfo($"Resetting weapon {weapon.m_shared.m_name} to default values");
+                            var defaults = weaponDefaults[weapon.m_shared.m_name];
+                            weapon.m_shared.m_attack.m_projectileVel = defaults.velocity;
+                            weapon.m_shared.m_attack.m_drawDurationMin = defaults.drawTime;
+                            Jotunn.Logger.LogInfo($"Spectral Arrow: Restored velocity for {weapon.m_shared.m_name} to {defaults.velocity} and draw time to {defaults.drawTime}");
                         }
                     }
                 }
@@ -688,8 +738,9 @@ namespace valheimmod
 
                     SpecialEffect = new CustomStatusEffect(pendeffect, fixReference: false);
                     SpecialCDEffect = new CustomStatusEffect(effect, fixReference: false);
-                    abilitySE.Add(SpecialEffect.StatusEffect);
-                    abilitySE.Add(SpecialCDEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityCooldownStatusEffects.Add(SpecialCDEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialCDEffect.StatusEffect);
                 }
                 public override void updateDuration(Dictionary<string, float> statusEffectDict)
                 {
@@ -735,7 +786,8 @@ namespace valheimmod
                 public string dome_uid = "valhalladome_uid";
                 public CustomStatusEffect SpecialEffect;
                 public CustomStatusEffect SpecialCDEffect;
-                public override List<StatusEffect> abilitySE { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityStatusEffects { get; set; } = new List<StatusEffect>();
+                public override List<StatusEffect> abilityCooldownStatusEffects { get; set; } = new List<StatusEffect>();
                 public bool abilityUsed = false; // Flag to indicate if the ability has been used
                 internal float ttl = 30f; // Time before the dome is destroyed
                 internal float cooldown = 15f * 60f; // Time before ability can be used again
@@ -794,8 +846,9 @@ namespace valheimmod
 
                     SpecialCDEffect = new CustomStatusEffect(cddomeeffect, fixReference: false);
                     SpecialEffect = new CustomStatusEffect(domeeffect, fixReference: false);
-                    abilitySE.Add(SpecialEffect.StatusEffect);
-                    abilitySE.Add(SpecialCDEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialEffect.StatusEffect);
+                    abilityStatusEffects.Add(SpecialCDEffect.StatusEffect);
+                    abilityCooldownStatusEffects.Add(SpecialCDEffect.StatusEffect);
                 }
 
                 public override void updateDuration(Dictionary<string, float> statusEffectDict)
