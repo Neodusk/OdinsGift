@@ -252,14 +252,29 @@ namespace valheimmod
 
                 public static void UpdateStatusEffect(Hud __instance, List<StatusEffect> statusEffectsList, Dictionary<string, string> durationDict = null)
                 {
+                    // Add null checks to prevent NullReferenceException
+                    if (__instance == null || statusEffectsList == null || specialAbilities == null)
+                        return;
+
                     // Update the textures for each status effect in the list
                     {
                         foreach (var ability in specialAbilities)
                         {
+                            if (ability == null) continue;
+
                             for (int j = 0; j < statusEffectsList.Count; j++)
                             {
                                 StatusEffect statusEffect = statusEffectsList[j];
-                                ability?.updateTexture(__instance, statusEffect, j);
+                                if (statusEffect == null) continue;
+
+                                try
+                                {
+                                    ability.updateTexture(__instance, statusEffect, j);
+                                }
+                                catch (System.Exception ex)
+                                {
+                                    Jotunn.Logger.LogError($"Error updating texture for ability {ability.GetType().Name}: {ex.Message}");
+                                }
                             }
                         }
                     }
@@ -762,19 +777,39 @@ namespace valheimmod
                 }
                 public override void updateTexture(Hud __instance, StatusEffect statusEffect, int index)
                 {
+                    // Add null checks to prevent NullReferenceException
+                    if (statusEffect?.m_name == null || SpecialEffect?.StatusEffect?.m_name == null)
+                        return;
+
+                    if (Player.m_localPlayer == null)
+                        return;
+
                     if (statusEffect.m_name == SpecialEffect.StatusEffect.m_name)
                     {
                         // Find the correct icon for the current arrow count
                         int arrowsLeft = 3 - (ShotsFired.ContainsKey(Player.m_localPlayer) ? ShotsFired[Player.m_localPlayer] : 0);
                         if (arrowsLeft > 0 && arrowsLeft <= 3)
                         {
+                            // Add null checks for HUD components
+                            if (__instance?.m_statusEffects == null || index < 0 || index >= __instance.m_statusEffects.Count)
+                                return;
+
                             // Update the icon in the HUD
                             RectTransform val2 = __instance.m_statusEffects[index];
-                            Image component = ((UnityEngine.Component)((Transform)val2).Find("Icon")).GetComponent<Image>();
-                            component.sprite = textures[arrowsLeft - 1];
+                            if (val2 == null)
+                                return;
+
+                            Transform iconTransform = ((Transform)val2).Find("Icon");
+                            if (iconTransform == null)
+                                return;
+
+                            Image component = iconTransform.GetComponent<Image>();
+                            if (component != null && textures != null && arrowsLeft - 1 < textures.Length)
+                            {
+                                component.sprite = textures[arrowsLeft - 1];
+                            }
                         }
                     }
-
                 }
             }
 
@@ -872,29 +907,47 @@ namespace valheimmod
                 public class MobOnlyShield : MonoBehaviour
                 {
                     private float repelForce = 30f; // Adjust this value to change the force applied to mobs
+                    
                     private void OnTriggerEnter(Collider other)
                     {
                         Jotunn.Logger.LogInfo($"MobOnlyShield OnTriggerEnter called for {other.name}");
-                        Character character = other.GetComponent<Character>();
-                        if (character != null && character.IsMonsterFaction(0f))
-                        {
-                            Jotunn.Logger.LogInfo($"Repelling mob: {character.name}");
-                            Vector3 repelDir = (character.transform.position - transform.position).normalized;
-                            character.m_body?.AddForce(repelDir * repelForce, ForceMode.VelocityChange);
-
-                        }
-                        else if (character != null)
-                        {
-                            Jotunn.Logger.LogInfo($"Ignoring non-monster character: {character.name}");
-                        }
+                        HandleMobRepelling(other);
                     }
+                    
                     private void OnTriggerStay(Collider other)
                     {
+                        HandleMobRepelling(other, true);
+                    }
+                    
+                    private void HandleMobRepelling(Collider other, bool isStay = false)
+                    {
                         Character character = other.GetComponent<Character>();
-                        if (character != null && character.IsMonsterFaction(0f))
+                        if (character == null) return;
+                        
+                        // Check if it's a monster/hostile creature
+                        if (character.IsMonsterFaction(0f))
                         {
-                            Vector3 repelDir = (character.transform.position - transform.position).normalized;
-                            character.m_body?.AddForce(repelDir * repelForce, ForceMode.VelocityChange); // Use Force for continuous push
+                            if (!isStay)
+                                Jotunn.Logger.LogInfo($"Repelling mob: {character.name}");
+                            
+                            // Only apply force if we can (either local player or have authority)
+                            if (character.m_nview != null && (character.m_nview.IsOwner() || Player.m_localPlayer != null))
+                            {
+                                Vector3 repelDir = (character.transform.position - transform.position).normalized;
+                                if (character.m_body != null)
+                                {
+                                    character.m_body.AddForce(repelDir * repelForce, ForceMode.VelocityChange);
+                                }
+                                else
+                                {
+                                    // Fallback: directly modify position if no rigidbody
+                                    character.transform.position += repelDir * 0.1f;
+                                }
+                            }
+                        }
+                        else if (character != null && !isStay)
+                        {
+                            Jotunn.Logger.LogInfo($"Ignoring non-monster character: {character.name}");
                         }
                     }
                 }
@@ -972,9 +1025,205 @@ namespace valheimmod
                         {
                             return;
                         }
-                        Player.m_localPlayer.m_seman.AddStatusEffect(SpecialEffect.StatusEffect, true);
-                        ValhallaDome.Instance.abilityUsed = true; // Reset the active dome
-                        CallManual();
+                        
+                        // Try to create the dome first, only add status effect if successful
+                        bool domeCreated = TryCreateDome();
+                        if (domeCreated)
+                        {
+                            // Add the status effect only after successful dome creation
+                            Player.m_localPlayer.m_seman.AddStatusEffect(SpecialEffect.StatusEffect, true);
+                            ValhallaDome.Instance.abilityUsed = true;
+                        }
+                        else
+                        {
+                            // If dome creation failed, show a message but don't add cooldown
+                            Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Failed to create dome");
+                        }
+                    }
+                }
+                
+                /// <summary>
+                /// Try to create a dome, return true if successful
+                /// </summary>
+                private bool TryCreateDome()
+                {
+                    try
+                    {
+                        Jotunn.Logger.LogInfo("ValhallaDome: TryCreateDome called");
+                        Vector3 position = Player.m_localPlayer.transform.position;
+                        
+                        // For now, use the simple approach like the original CallManual
+                        // The networking can be added back later once this works
+                        if (Player.m_localPlayer == null) 
+                        {
+                            Jotunn.Logger.LogError("ValhallaDome: Player.m_localPlayer is null");
+                            return false;
+                        }
+                        
+                        if (ZNetScene.instance == null)
+                        {
+                            Jotunn.Logger.LogError("ValhallaDome: ZNetScene.instance is null");
+                            return false;
+                        }
+                        
+                        GameObject domePrefab = ZNetScene.instance.GetPrefab("piece_shieldgenerator");
+                        if (domePrefab != null)
+                        {
+                            Jotunn.Logger.LogInfo("ValhallaDome: Found shield generator prefab, creating dome");
+                            Quaternion rot = Quaternion.identity;
+                            ActiveDome = UnityEngine.Object.Instantiate(domePrefab, position, rot);
+                            Jotunn.Logger.LogInfo($"ValhallaDome: Instantiated dome at position {position}");
+                            
+                            var znetView = ActiveDome.GetComponent<ZNetView>();
+                            if (znetView != null && znetView.IsValid())
+                            {
+                                Jotunn.Logger.LogInfo("ValhallaDome: ZNetView is valid, setting up dome");
+                                string uniqueId = System.Guid.NewGuid().ToString();
+                                znetView.GetZDO().Set(dome_uid, uniqueId);
+                                znetView.GetZDO().Set("valhalla_dome_setup", true); // Mark this as a valhalla dome
+                                
+                                Instance.LastDomeUID = uniqueId;
+                                PlayerPrefs.SetString("Dome_LastDomeUID", uniqueId);
+                                PlayerPrefs.Save();
+
+                                Jotunn.Logger.LogInfo($"ValhallaDome: Dome created with UID: {uniqueId}");
+                                
+                                // Start a coroutine to set up the shield after one frame
+                                Player.m_localPlayer.StartCoroutine(SetupShieldNextFrame(ActiveDome));
+                                return true;
+                            }
+                            else
+                            {
+                                Jotunn.Logger.LogError("ValhallaDome: ZNetView is null or invalid");
+                                if (znetView == null)
+                                    Jotunn.Logger.LogError("ValhallaDome: ZNetView component not found");
+                                else
+                                    Jotunn.Logger.LogError("ValhallaDome: ZNetView is not valid");
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            Jotunn.Logger.LogError("ValhallaDome: Could not find piece_shieldgenerator prefab");
+                            return false;
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Jotunn.Logger.LogError($"ValhallaDome: Error creating dome: {ex.Message}");
+                        return false;
+                    }
+                }
+                
+                /// <summary>
+                /// Request dome creation at the specified position. Handles both server and client cases.
+                /// </summary>
+                public void RequestDomeCreation(Vector3 position)
+                {
+                    try
+                    {
+                        if (ZNet.instance == null)
+                        {
+                            Jotunn.Logger.LogError("ValhallaDome: ZNet.instance is null, cannot create dome");
+                            return;
+                        }
+                        
+                        if (ZNet.instance.IsServer())
+                        {
+                            // If we're the server, create the dome directly
+                            Jotunn.Logger.LogInfo("ValhallaDome: Server creating dome directly");
+                            CreateDomeAtPosition(position);
+                        }
+                        else
+                        {
+                            // If we're a client, send an RPC request to the server
+                            Jotunn.Logger.LogInfo("ValhallaDome: Client requesting dome creation from server");
+                            if (ZRoutedRpc.instance != null && ZNet.instance.GetServerPeer() != null)
+                            {
+                                ZRoutedRpc.instance.InvokeRoutedRPC(ZNet.instance.GetServerPeer().m_uid, "ValhallaDome_RequestCreation", 
+                                    position.x, position.y, position.z);
+                            }
+                            else
+                            {
+                                Jotunn.Logger.LogError("ValhallaDome: Cannot send RPC - ZRoutedRpc or server peer is null");
+                            }
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Jotunn.Logger.LogError($"ValhallaDome: Error in RequestDomeCreation: {ex.Message}");
+                    }
+                }
+                
+                /// <summary>
+                /// Actually creates the dome at the specified position. Only called on server.
+                /// </summary>
+                public void CreateDomeAtPosition(Vector3 position)
+                {
+                    try
+                    {
+                        if (ZNet.instance == null || !ZNet.instance.IsServer())
+                        {
+                            Jotunn.Logger.LogWarning("ValhallaDome: CreateDomeAtPosition called on client, ignoring");
+                            return;
+                        }
+                        
+                        GameObject domePrefab = ZNetScene.instance?.GetPrefab("piece_shieldgenerator");
+                        if (domePrefab != null)
+                        {
+                            Quaternion rot = Quaternion.identity;
+                            
+                            // Create the dome through the network spawning system
+                            GameObject spawnedDome = UnityEngine.Object.Instantiate(domePrefab, position, rot);
+                            var znetView = spawnedDome.GetComponent<ZNetView>();
+                            
+                            if (znetView != null)
+                            {
+                                // Take ownership of the networked object
+                                znetView.ClaimOwnership();
+                                
+                                if (znetView.IsValid())
+                                {
+                                    string uniqueId = System.Guid.NewGuid().ToString();
+                                    znetView.GetZDO().Set(dome_uid, uniqueId);
+                                    znetView.GetZDO().Set("valhalla_dome_setup", true); // Mark this as a valhalla dome
+                                    
+                                    Instance.LastDomeUID = uniqueId;
+                                    PlayerPrefs.SetString("Dome_LastDomeUID", uniqueId);
+                                    PlayerPrefs.Save();
+
+                                    Jotunn.Logger.LogInfo($"ValhallaDome: Server created dome with UID: {uniqueId} at position {position}");
+                                    
+                                    // Store reference locally for the server
+                                    if (ActiveDome == null) // Only set if we don't have an active dome
+                                    {
+                                        ActiveDome = spawnedDome;
+                                    }
+                                    
+                                    // Setup the dome immediately for the server/host
+                                    if (Player.m_localPlayer != null)
+                                    {
+                                        Player.m_localPlayer.StartCoroutine(SetupShieldNextFrame(spawnedDome));
+                                    }
+                                }
+                                else
+                                {
+                                    Jotunn.Logger.LogError("ValhallaDome: ZNetView is not valid, cannot create dome");
+                                }
+                            }
+                            else
+                            {
+                                Jotunn.Logger.LogError("ValhallaDome: No ZNetView component found on dome prefab");
+                            }
+                        }
+                        else
+                        {
+                            Jotunn.Logger.LogError("ValhallaDome: Could not find piece_shieldgenerator prefab");
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Jotunn.Logger.LogError($"ValhallaDome: Error in CreateDomeAtPosition: {ex.Message}");
                     }
                 }
 
