@@ -105,7 +105,7 @@ For a full list of valid button names, see the BepInEx or Jötunn documentation.
 
 ---
 
-## Minimal Reference
+## Jotunn
 
 This mod is built using [Jötunn](https://github.com/Valheim-Modding/Jotunn) and BepInEx. For modding help, see the [Jötunn Docs](https://valheim-modding.github.io/Jotunn/guides/overview.html).
 
