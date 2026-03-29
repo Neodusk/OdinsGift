@@ -197,6 +197,64 @@ namespace valheimmod
             AddLocs();
             AddInputs();
             PrefabManager.OnPrefabsRegistered += ModAbilities.Effects.Register;
+            
+            // Register RPC methods for ValhallaDome networking (delayed to ensure ZNet is ready)
+            PrefabManager.OnPrefabsRegistered += RegisterRPCMethods;
+        }
+        
+        /// <summary>
+        /// Register RPC methods for networking between clients and server
+        /// </summary>
+        private void RegisterRPCMethods()
+        {
+            try
+            {
+                if (ZRoutedRpc.instance != null)
+                {
+                    // Register the RPC handler for dome creation requests
+                    ZRoutedRpc.instance.Register("ValhallaDome_RequestCreation", new System.Action<long, float, float, float>(OnDomeCreationRequested));
+                    Jotunn.Logger.LogInfo("ValhallaDome: Registered RPC methods successfully");
+                }
+                else
+                {
+                    Jotunn.Logger.LogWarning("ValhallaDome: ZRoutedRpc.instance is null, cannot register RPC methods");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Jotunn.Logger.LogError($"ValhallaDome: Failed to register RPC methods: {ex.Message}");
+            }
+        }
+        
+        /// <summary>
+        /// Handle dome creation requests from clients (server-side)
+        /// </summary>
+        private void OnDomeCreationRequested(long senderUID, float x, float y, float z)
+        {
+            try
+            {
+                Jotunn.Logger.LogInfo($"ValhallaDome: Received dome creation request from client {senderUID} at position ({x}, {y}, {z})");
+                
+                if (ZNet.instance == null || !ZNet.instance.IsServer())
+                {
+                    Jotunn.Logger.LogWarning("ValhallaDome: Received RPC on client or ZNet not ready, ignoring");
+                    return;
+                }
+                
+                Vector3 position = new Vector3(x, y, z);
+                if (ModAbilities.ValhallaDome.Instance != null)
+                {
+                    ModAbilities.ValhallaDome.Instance.CreateDomeAtPosition(position);
+                }
+                else
+                {
+                    Jotunn.Logger.LogError("ValhallaDome: Instance is null, cannot create dome");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Jotunn.Logger.LogError($"ValhallaDome: Error handling dome creation request: {ex.Message}");
+            }
         }
 
         private void Update()
@@ -661,7 +719,17 @@ namespace valheimmod
         {
             static void Postfix(Hud __instance, List<StatusEffect> statusEffects)
             {
-                ModAbilities.Effects.UpdateStatusEffect(__instance, statusEffects);
+                try
+                {
+                    if (__instance != null && statusEffects != null)
+                    {
+                        ModAbilities.Effects.UpdateStatusEffect(__instance, statusEffects);
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Jotunn.Logger.LogError($"Error in Hud_UpdateStatusEffects_Patch: {ex.Message}");
+                }
             }
         }
 
@@ -778,6 +846,128 @@ namespace valheimmod
             {
                 LoggedIn = false;
                 Jotunn.Logger.LogInfo("Transitioning to main scene, resetting LoggedIn to false.");
+            }
+        }
+
+        // Patch to detect and setup Valhalla Domes on all clients
+        [HarmonyPatch(typeof(ShieldGenerator), "Start")]
+        public static class ShieldGenerator_Start_ValhallaDome_Patch
+        {
+            static void Postfix(ShieldGenerator __instance)
+            {
+                try
+                {
+                    if (__instance == null) return;
+
+                    var znetView = __instance.GetComponent<ZNetView>();
+                    if (znetView != null && znetView.IsValid())
+                    {
+                        // Check if this is marked as a Valhalla Dome
+                        if (znetView.GetZDO().GetBool("valhalla_dome_setup", false))
+                        {
+                            Jotunn.Logger.LogInfo($"ValhallaDome: Detected Valhalla Dome on client, setting up...");
+                            
+                            // Start coroutine to setup the dome on the next frame
+                            if (Player.m_localPlayer != null)
+                            {
+                                Player.m_localPlayer.StartCoroutine(SetupValhallaDomeCoroutine(__instance.gameObject));
+                            }
+                        }
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Jotunn.Logger.LogError($"ValhallaDome: Error in ShieldGenerator patch: {ex.Message}");
+                }
+            }
+            
+            private static System.Collections.IEnumerator SetupValhallaDomeCoroutine(GameObject dome)
+            {
+                yield return null; // Wait one frame
+
+                if (dome == null)
+                {
+                    Jotunn.Logger.LogError("ValhallaDome: Dome GameObject is null in coroutine");
+                    yield break;
+                }
+
+                var shieldGen = dome.GetComponent<ShieldGenerator>();
+                if (shieldGen != null)
+                {
+                    Jotunn.Logger.LogInfo("ValhallaDome: Setting up shield generator for client");
+                    
+                    shieldGen.m_offWhenNoFuel = false;
+                    shieldGen.m_minShieldRadius = 4f;
+                    shieldGen.m_maxShieldRadius = 4f;
+                    shieldGen.SetFuel(shieldGen.m_maxFuel);
+                    shieldGen.UpdateShield();
+
+                    // Wait another frame for the shield dome to be created
+                    yield return null;
+
+                    // Hide all MeshRenderers except the dome
+                    foreach (var renderer in dome.GetComponentsInChildren<MeshRenderer>(true))
+                    {
+                        if (shieldGen.m_shieldDome == null || !renderer.transform.IsChildOf(shieldGen.m_shieldDome.transform))
+                        {
+                            renderer.enabled = false;
+                            Jotunn.Logger.LogInfo($"ValhallaDome: Hiding renderer on {renderer.name}");
+                        }
+                    }
+
+                    // Setup the dome's mob-repelling functionality
+                    var domeObj = shieldGen.m_shieldDome;
+                    if (domeObj != null)
+                    {
+                        Jotunn.Logger.LogInfo("ValhallaDome: Setting up dome collider and mob repelling");
+                        
+                        // Remove existing colliders except the dome's own
+                        foreach (var col in dome.GetComponentsInChildren<Collider>())
+                        {
+                            if (col.transform != domeObj.transform)
+                            {
+                                UnityEngine.Object.Destroy(col);
+                            }
+                        }
+                        
+                        // Add the sphere collider for mob detection
+                        var collider = domeObj.GetComponent<SphereCollider>();
+                        if (collider == null)
+                        {
+                            collider = domeObj.AddComponent<SphereCollider>();
+                            collider.isTrigger = true;
+                            float visualRadius = shieldGen.m_maxShieldRadius;
+                            float scale = domeObj.transform.lossyScale.x;
+                            float fudge = 0.3f;
+                            collider.radius = (visualRadius / scale) * fudge;
+                            
+                            // Add the mob-only shield component
+                            var mobShield = domeObj.GetComponent<ModAbilities.ValhallaDome.MobOnlyShield>();
+                            if (mobShield == null)
+                            {
+                                domeObj.AddComponent<ModAbilities.ValhallaDome.MobOnlyShield>();
+                            }
+                        }
+                        
+                        domeObj.layer = LayerMask.NameToLayer("character");
+                    }
+
+                    // Setup timed destruction
+                    var timedDestruction = dome.GetComponent<TimedDestruction>();
+                    if (timedDestruction == null)
+                    {
+                        timedDestruction = dome.AddComponent<TimedDestruction>();
+                    }
+                    timedDestruction.m_forceTakeOwnershipAndDestroy = true;
+                    timedDestruction.m_timeout = ModAbilities.ValhallaDome.Instance.ttl;
+                    timedDestruction.Trigger();
+                    
+                    Jotunn.Logger.LogInfo("ValhallaDome: Client setup complete");
+                }
+                else
+                {
+                    Jotunn.Logger.LogError("ValhallaDome: ShieldGenerator component not found on dome");
+                }
             }
         }
     }
